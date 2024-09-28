@@ -22,7 +22,7 @@ class AffordQ(Dataset):
                  split='train',
                  **kwargs
                  ):
-        data_root='../../3d_affordance/LASO_dataset'
+        data_root='/teamspace/studios/this_studio/LASO_dataset' # dataset path
 
         self.split = split
         #

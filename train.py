@@ -5,10 +5,13 @@ import os
 import logging
 from utils.util import seed_torch, set_gpu_devices, read_yaml
 from utils.logger import logger as loggger
+import time
+from tqdm import tqdm
+import torch
 
 parser = argparse.ArgumentParser()
-
-parser.add_argument("-v", type=str, required=True, help="version", default="try")
+ 
+parser.add_argument("-v", type=str, required=True, help="version", default=0)
 parser.add_argument("-bs", type=int, action="store", help="BATCH_SIZE", default=16)
 parser.add_argument("-lr", type=float, action="store", help="learning rate", default=1e-4)
 parser.add_argument("-tlr", type=float, action="store", help="learning rate for text encoder", default=5e-6)
@@ -16,7 +19,7 @@ parser.add_argument("-epoch", type=int, action="store", help="epoch for train", 
 
 # parser.add_argument('-radius', type=float, default=0.1, help='radius for ball query in last decoder')
 parser.add_argument("-n_groups", type=int, action="store", help="num of queres", default=40)
-parser.add_argument("-gpu", type=int, help="set gpu id", default=1) 
+parser.add_argument("-gpu", type=int, help="set gpu id", default=0) 
 parser.add_argument('--decay_rate', type=float, default=1e-3, help='weight decay [default: 1e-3]')
 parser.add_argument('--use_gpu', type=str, default=True, help='whether or not use gpus')
 parser.add_argument('--save_dir', type=str, default='runs/train/', help='path to save .pt model while training')
@@ -25,7 +28,7 @@ parser.add_argument('--resume', type=str, default=False, help='start training fr
 parser.add_argument('--checkpoint_path', type=str, default='runs/train/PointRefer/best.pt', help='checkpoint path')
 parser.add_argument('--log_name', type=str, default='train.log', help='the name of current training')
 parser.add_argument('--loss_cls', type=float, default=0.3, help='cls loss scale')
-parser.add_argument('--storage', type=bool, default=False, help='whether to storage the model during training')
+parser.add_argument('--storage', type=bool, default=True, help='whether to storage the model during training')
 parser.add_argument('--yaml', type=str, default='config/default.yaml', help='yaml path')
 
 opt = parser.parse_args()
@@ -51,6 +54,7 @@ def main(opt, dict):
     else:
         device = torch.device("cpu")
 
+    print(f'Device: {device}')
     save_path = opt.save_dir + opt.name
     foler = os.path.exists(save_path)
     if not foler:
@@ -60,17 +64,17 @@ def main(opt, dict):
 
     logger.debug('Start loading train data---')
     train_dataset = AffordQ('train')
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=8 ,shuffle=True, drop_last=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=16 ,shuffle=True, drop_last=True)
     logger.debug(f'train data loading finish, loading data files:{len(train_dataset)}')
 
     logger.debug('Start loading val data---')
     val_dataset = AffordQ('val')
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=8, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=16, shuffle=False)
     logger.debug(f'val data loading finish, loading data files:{len(val_dataset)}')
 
     logger.debug('Start loading test data---')
     test_dataset = AffordQ('test')
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=8, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=16, shuffle=False)
     logger.debug(f'test data loading finish, loading data files:{len(test_dataset)}')
 
     model = get_PointRefer(emb_dim=dict['emb_dim'],
@@ -100,11 +104,13 @@ def main(opt, dict):
     criterion_ce = criterion_ce.to(device)
 
     best_IOU = 0
-    '''
-    Training
-    '''
-    for epoch in range(start_epoch+1, dict['Epoch']):
-        logger.debug(f'Epoch:{epoch} strat-------')
+
+
+    # 初始化总训练时间计时器
+    start_time = time.time()
+
+    for epoch in range(start_epoch + 1, dict['Epoch']):
+        logger.debug(f'Epoch:{epoch} start-------')
         learning_rate = optimizer.state_dict()['param_groups'][0]['lr']
         logger.debug(f'lr_rate:{learning_rate}')
 
@@ -112,12 +118,16 @@ def main(opt, dict):
         loss_sum = 0
         total_point = 0
         model = model.train()
-        # print(f'cuda memory:{torch.cuda.memory_allocated(opt.gpu) / (1024*1024)}')
-        for i,(point, cls, gt_mask, question, aff_label) in enumerate(train_loader):
-            
-            optimizer.zero_grad()      
+        print(f'cuda memory:{torch.cuda.memory_allocated(opt.gpu) / (1024*1024)} MB')
 
-            if(opt.use_gpu):
+        # 记录epoch开始时间
+        epoch_start_time = time.time()
+
+        # 使用tqdm包装train_loader
+        for i, (point, cls, gt_mask, question, aff_label) in enumerate(tqdm(train_loader, desc=f'Epoch {epoch}')):
+            optimizer.zero_grad()
+
+            if opt.use_gpu:
                 point = point.to(device)
                 gt_mask = gt_mask.to(device)
                 aff_label = aff_label.to(device)
@@ -127,20 +137,26 @@ def main(opt, dict):
             loss_hm = criterion_hm(_3d, gt_mask)
             # loss_ce = criterion_ce(logits, cls)
 
-            temp_loss = loss_hm # + opt.loss_cls*loss_ce
+            temp_loss = loss_hm  # + opt.loss_cls*loss_ce
 
-            print(f'Epoch:{epoch}| iteration:{i}|{len(train_loader)} | loss:{temp_loss.item()}')
+            # 计算ETA
+            # elapsed_time = time.time() - epoch_start_time
+            # eta = (elapsed_time / (i + 1)) * (num_batches - i - 1)  # 当前epoch剩余时间
+            # total_eta = eta + ((time.time() - start_time) / (epoch - start_epoch)) * (dict['Epoch'] - epoch - 1)  # 总剩余时间
+            # print(f'ETA: {eta:.2f}s (epoch)')
+
             temp_loss.backward()
             optimizer.step()
             loss_sum += temp_loss.item()
 
-        # print(f'cuda memorry:{torch.cuda.memory_allocated(opt.gpu) / (1024*1024)}')
-        mean_loss = loss_sum / (num_batches*dict['pairing_num'])
+        print(f'cuda memory:{torch.cuda.memory_allocated(opt.gpu) / (1024*1024)} MB')
+        mean_loss = loss_sum / (num_batches * dict['pairing_num'])
         logger.debug(f'Epoch:{epoch} | mean_loss:{mean_loss}')
 
-        if(opt.storage == True):
-            if((epoch+1) % 1==0):
-                model_path = save_path + '/Epoch_' + str(epoch+1) + '.pt'
+        # 存储模型部分保持不变
+        if opt.storage == True:
+            if (epoch + 1) % 1 == 0:
+                model_path = save_path + '/Epoch_' + str(epoch + 1) + '.pt'
                 checkpoint = {
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -148,7 +164,7 @@ def main(opt, dict):
                 }
                 torch.save(checkpoint, model_path)
                 logger.debug(f'model saved at {model_path}')
-        
+
         results = torch.zeros((len(val_dataset), 2048, 1))
         targets = torch.zeros((len(val_dataset), 2048, 1))
         '''
